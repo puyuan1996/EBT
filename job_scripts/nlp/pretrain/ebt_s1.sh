@@ -53,7 +53,7 @@ python train_model.py \
 --dataset_dir "/mnt/shared-storage-user/puyuan/code/EBT/data" \
 --num_workers 12 \
 --validation_split_pct 0.0005 \
---val_check_interval 15000 \
+--val_check_interval 1500 \
 \
 --wandb_project 'nlp_pretrain' \
 \
@@ -63,3 +63,5 @@ python train_model.py \
 --set_matmul_precision "medium" \
 --wandb_watch \
 ${SLURM_ARRAY_TASK_ID:+--is_slurm_run}
+
+# --val_check_interval 15000 \

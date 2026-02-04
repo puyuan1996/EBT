@@ -14,7 +14,9 @@ SAVE_ROOT = "/mnt/shared-storage-user/puyuan/code/EBT/dataset/RedPajama-Data-V2-
 # "sample": 只下载每个分类的前 N 个文件 (用于测试)
 # "full": 下载清单中的所有文件 (慎用！数据量巨大)
 MODE = "sample" 
-SAMPLE_COUNT = 5  # 如果是 sample 模式，下载多少个文件
+
+# pajama 100B样本 一共10000条 大概需要1000g
+SAMPLE_COUNT = 500  # 41G 
 
 # 3. 数据配置
 # 可选语言: "en", "de", "fr", "es", "it"
