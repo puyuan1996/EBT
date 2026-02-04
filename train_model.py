@@ -329,7 +329,7 @@ if __name__ == '__main__':
     # NLP SPECIFIC PARAMS ############################################################################################################
 
     parser.add_argument("--tokenizer", help="tokenizer for nlp tasks", type=str, default="EleutherAI/gpt-neox-20b")
-    
+
     parser.add_argument("--pretokenize_dataset", help="whether to pretokenize the dataset and save that or just tokenize as loading the dataset. tokenizing the dataset takes a long time and may need to be done using debug dataloader. due to a bug with HF does not always work reliably, may get stuck. not currently implemented for fine-tuning datasets", action="store_true", default=False)
 
     parser.add_argument("--normalize_initial_condition", help="makes initial condition a normalized probability distribution if modality is NLP, helps a ton with stability", action="store_true", default = False)
@@ -666,7 +666,8 @@ if __name__ == '__main__':
 
     parser.add_argument("--wandb_tags", help="wandb tags to add", nargs='+', default=None)
 
-    parser.add_argument("--wandb_offline", help="set wandb to offline mode", action="store_true", default=False)
+    # parser.add_argument("--wandb_offline", help="set wandb to offline mode", action="store_true", default=False)
+    parser.add_argument("--wandb_offline", help="set wandb to offline mode", action="store_true", default=True)
 
     parser.add_argument("--wandb_watch", help="turns on watch mode for wandb - expensive so only use for debugging", action="store_true", default=False) 
 

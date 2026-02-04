@@ -15,7 +15,14 @@ class RedPajamaDataset(Dataset):
         #NOTE there is only 1 split (train) so every other split does the same here
         self.max_length = hparams.context_length+1
         hf_home = os.getenv('HF_HOME')
-        dataset_dir = hparams.dataset_dir if hparams.dataset_dir != "" else hf_home
+
+        # Get dataset_dir with proper fallback logic
+        dataset_dir = getattr(hparams, 'dataset_dir', None)
+        if dataset_dir is None or dataset_dir == "":
+            dataset_dir = hf_home
+        if dataset_dir is None:
+            # Final fallback to default HuggingFace cache directory
+            dataset_dir = os.path.expanduser("~/.cache/huggingface")
         self.tokenizer = AutoTokenizer.from_pretrained(hparams.tokenizer, clean_up_tokenization_spaces = False)
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id # just for reference the tokenizer is fast
 

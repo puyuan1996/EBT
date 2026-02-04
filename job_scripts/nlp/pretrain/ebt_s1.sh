@@ -25,8 +25,7 @@ python train_model.py \
 --model_size ${MODEL_SIZE} \
 \
 --pretokenize_dataset \
---tokenizer "EleutherAI/gpt-neox-20b" \
-\
+--tokenizer "/mnt/shared-storage-user/puyuan/code/EBT/gpt-neox-20b-tokenizer" \
 --normalize_initial_condition \
 --ebt_type "time_embed" \
 --denoising_initial_condition "random_noise" \
@@ -51,6 +50,7 @@ python train_model.py \
 --warm_up_steps 10000 \
 \
 --dataset_name "pajama" \
+--dataset_dir "/mnt/shared-storage-user/puyuan/code/EBT/data" \
 --num_workers 12 \
 --validation_split_pct 0.0005 \
 --val_check_interval 15000 \
