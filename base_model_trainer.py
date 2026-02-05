@@ -457,7 +457,7 @@ class ModelTrainer(L.LightningModule):
     def create_full_ds(self):
         if self.hparams.dataset_name == "coco_tiny":
             self.full_ds = COCOTinyDataset(self.hparams, split = "train", transform = self.transform)
-        if self.hparams.dataset_name == "ucf101":
+        elif self.hparams.dataset_name == "ucf101":
             self.full_ds = UCF101Dataset(self.hparams, split = "train", transform = self.transform)
         elif self.hparams.dataset_name == "vid_synthetic":
             self.full_ds = VIDSyntheticDataset(self.hparams)
