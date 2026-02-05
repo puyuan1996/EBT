@@ -55,10 +55,12 @@ class ModelTrainer(L.LightningModule):
         else:
             self.hparams.update(vars(hparams))
         # self.txt_logger = hparams.txt_logger if txt_logger == None else txt_logger # txt_logger is no longer supported
+        self.infer_logger = None  # Initialize to None, will be created only on rank 0
         if self.hparams.modality == "NLP":
             if "execution_mode" in self.hparams and "save_generation_logs_dir" in self.hparams and self.hparams.execution_mode == "inference": # two of these are sanity check for loading pretrained ckpt that may not have newer params
-                print("setting up infer logger")
-                self.infer_logger = text_logger.setup_jsonl_logger(log_filename = "results.jsonl", base_log_dir=self.hparams.save_generation_logs_dir)
+                # Only create logger on rank 0 to avoid multi-process file conflicts
+                # Note: self.global_rank is not available yet in __init__, will be set in setup()
+                pass
         if self.hparams.modality == "VID": #is computer vision
             self.image_dims = self.hparams.image_dims # list size two
             self.num_generated_videos = 0
@@ -265,9 +267,10 @@ class ModelTrainer(L.LightningModule):
         self.log_metrics(eval_step_dict, "valid")
 
     def test_step(self, batch, batch_idx):
-        if self.hparams.execution_mode == "inference":  
+        if self.hparams.execution_mode == "inference":
             if self.hparams.modality == "NLP":
                 outputs = generate_text(self.model, batch, self.hparams)
+                # Each rank writes to its own file (setup in setup() method)
                 for output in outputs:
                     self.infer_logger.log_data(output)
             elif self.hparams.modality == "VID":
@@ -556,6 +559,15 @@ class ModelTrainer(L.LightningModule):
             else:
                 raise NotImplementedError("haven't implemented this dataset yet")
             print(f"{self.hparams.dataset_name} length of test_ds: {len(self.test_ds)}")
+
+            # Setup inference logger - each rank writes to separate file to avoid conflicts
+            if self.hparams.modality == "NLP":
+                if "execution_mode" in self.hparams and "save_generation_logs_dir" in self.hparams and self.hparams.execution_mode == "inference":
+                    # Each rank writes to its own file to avoid multi-process file conflicts
+                    # Files will be merged in train_model.py after testing
+                    log_filename = f"results_rank_{self.global_rank}.jsonl"
+                    print(f"rank {self.global_rank}: setting up infer logger with filename {log_filename}")
+                    self.infer_logger = text_logger.setup_jsonl_logger(log_filename=log_filename, base_log_dir=self.hparams.save_generation_logs_dir)
         else:
             raise ValueError(f"Unknown stage: {stage}, please investigate")
     

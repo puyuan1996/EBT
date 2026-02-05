@@ -16,7 +16,15 @@ SAVE_ROOT = "/mnt/shared-storage-user/puyuan/code/EBT/dataset/RedPajama-Data-V2-
 MODE = "sample" 
 
 # pajama 100B样本 一共10000条 大概需要1000g
-SAMPLE_COUNT = 500  # 41G 
+# SAMPLE_COUNT = 500  # 41G  5%
+# SAMPLE_COUNT = 1000  # 82G  10%
+
+SAMPLE_COUNT = 2000  # 162G  20%
+
+# SAMPLE_COUNT = 10000  # 800G  100%
+
+
+
 
 # 3. 数据配置
 # 可选语言: "en", "de", "fr", "es", "it"

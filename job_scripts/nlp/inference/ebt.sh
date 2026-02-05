@@ -62,10 +62,10 @@ python train_model.py \
 --execution_mode "inference" \
 --infer_ebt_advanced \
 --infer_langevin_dynamics_noise 1 \
---infer_ebt_num_steps 2 \
+--infer_ebt_num_steps 10 \
 --only_test \
 --only_test_model_ckpt "/mnt/shared-storage-user/puyuan/code/EBT/logs/checkpoints/ebt-xxs-bs_256_s1_lr_0.0012_2026-02-05_02-06-28_/epoch=epoch=34-step=step=18760-valid_loss=valid_loss=4.2817.ckpt" \
---infer_max_gen_len 2 \
+--infer_max_gen_len 520 \
 --infer_topp 0.1 \
 --infer_temp 0.0 \
 --override_slurm_checks \
@@ -75,4 +75,5 @@ python train_model.py \
 ${SLURM_ARRAY_TASK_ID:+--is_slurm_run}
 
 # --tokenizer "EleutherAI/gpt-neox-20b" \
-# 
+# --infer_ebt_num_steps 2 \
+# --infer_max_gen_len 2 \
