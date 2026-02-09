@@ -15,7 +15,10 @@ mkdir -p logs/slurm/nlp_inference/
 module purge
 
 
-BENCHMARKS=("lambada") # "gsm8k" "ai2arc" "bigbench_matrixshapes" "squad" "bigbench_elementary_math_qa" "bigbench_dyck_languages" 
+
+# BENCHMARKS=("pajama") # "gsm8k" "ai2arc" "bigbench_matrixshapes" "squad" "bigbench_elementary_math_qa" "bigbench_dyck_languages" 
+BENCHMARKS=("gsm8k") # "gsm8k" "ai2arc" "bigbench_matrixshapes" "squad" "bigbench_elementary_math_qa" "bigbench_dyck_languages" 
+
 DATASET=${BENCHMARKS[$SLURM_ARRAY_TASK_ID]}
 export RUN_NAME="${RUN_NAME}_${DATASET}"
 
@@ -25,8 +28,7 @@ python train_model.py \
 --model_name ${MODEL_NAME} \
 --model_size ${MODEL_SIZE} \
 \
---tokenizer "EleutherAI/gpt-neox-20b" \
-\
+--tokenizer "/mnt/shared-storage-user/puyuan/code/EBT/gpt-neox-20b-tokenizer" \
 --normalize_initial_condition \
 --ebt_type "time_embed" \
 --denoising_initial_condition "random_noise" \
@@ -47,6 +49,7 @@ python train_model.py \
 --warm_up_steps 10000 \
 \
 --dataset_name ${DATASET} \
+--dataset_dir "/mnt/shared-storage-user/puyuan/code/EBT/data" \
 --num_workers 12 \
 --validation_split_pct 0.0005 \
 --val_check_interval 15000 \
@@ -59,10 +62,10 @@ python train_model.py \
 --execution_mode "inference" \
 --infer_ebt_advanced \
 --infer_langevin_dynamics_noise 1 \
---infer_ebt_num_steps 2 \
+--infer_ebt_num_steps 10 \
 --only_test \
---only_test_model_ckpt "your/model/ckpt" \
---infer_max_gen_len 2 \
+--only_test_model_ckpt "/mnt/shared-storage-user/puyuan/code/EBT/logs/checkpoints/ebt-xxs-bs_256_s1_lr_0.0012_2026-02-05_02-06-28_/epoch=epoch=34-step=step=18760-valid_loss=valid_loss=4.2817.ckpt" \
+--infer_max_gen_len 520 \
 --infer_topp 0.1 \
 --infer_temp 0.0 \
 --override_slurm_checks \
@@ -70,3 +73,7 @@ python train_model.py \
 --set_matmul_precision "medium" \
 --wandb_watch \
 ${SLURM_ARRAY_TASK_ID:+--is_slurm_run}
+
+# --tokenizer "EleutherAI/gpt-neox-20b" \
+# --infer_ebt_num_steps 2 \
+# --infer_max_gen_len 2 \

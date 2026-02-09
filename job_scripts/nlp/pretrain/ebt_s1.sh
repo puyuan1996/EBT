@@ -7,7 +7,9 @@
 ### LOG INFO ###
 #SBATCH --job-name=ebt-xxs-bs_256_s1_lr_
 #SBATCH --output=logs/slurm/nlp/ebt-xxs-bs_256_s1_lr_%A-%a.log
+
 export RUN_NAME="ebt-xxs-bs_256_s1_lr_"
+
 # NOTE ctrl d ALL THREE of above to modify job-name, output, and RUN_NAME (which should all be the same)
 export MODEL_NAME="${RUN_NAME%%-*}"
 export MODEL_SIZE="${RUN_NAME#*-}"; export MODEL_SIZE="${MODEL_SIZE%%-*}"
@@ -19,14 +21,13 @@ alpha=(500)
 alpha_lr=(1500)
 
 python train_model.py \
---run_name ${RUN_NAME}${lr[${SLURM_ARRAY_TASK_ID}]} \
+--run_name ${RUN_NAME}${lr[${SLURM_ARRAY_TASK_ID}]}+"pajama2000" \
 --modality "NLP" \
 --model_name ${MODEL_NAME} \
 --model_size ${MODEL_SIZE} \
 \
 --pretokenize_dataset \
---tokenizer "EleutherAI/gpt-neox-20b" \
-\
+--tokenizer "/mnt/shared-storage-user/puyuan/code/EBT/gpt-neox-20b-tokenizer" \
 --normalize_initial_condition \
 --ebt_type "time_embed" \
 --denoising_initial_condition "random_noise" \
@@ -51,9 +52,10 @@ python train_model.py \
 --warm_up_steps 10000 \
 \
 --dataset_name "pajama" \
+--dataset_dir "/mnt/shared-storage-user/puyuan/code/EBT/data" \
 --num_workers 12 \
 --validation_split_pct 0.0005 \
---val_check_interval 15000 \
+--val_check_interval 2000 \
 \
 --wandb_project 'nlp_pretrain' \
 \
@@ -63,3 +65,5 @@ python train_model.py \
 --set_matmul_precision "medium" \
 --wandb_watch \
 ${SLURM_ARRAY_TASK_ID:+--is_slurm_run}
+
+# --val_check_interval 15000 \

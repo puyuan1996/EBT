@@ -28,13 +28,48 @@ from base_model_trainer import *
 from inference.nlp.eval import nlp_eval_acc
 
 @rank_zero_only # to ensure only one wandb run is created, if didnt do that then each GPU would create its own wandb run
-def setup_wandb(args): 
+def setup_wandb(args):
     import wandb
     if wandb.run is None:
         run = wandb.init(dir="logs/", name=f'{args.run_name}', entity=f'{args.wandb_entity}', project=f'{args.wandb_project}', mode = "offline" if args.wandb_offline else "online") # this is solely used to force wandb to start tracking stdout in logs
         wandb.define_metric("__init", hidden=True)
         return run
     return None
+
+def merge_rank_results(save_dir, num_gpus):
+    """
+    Merge JSONL files from different ranks into a single results.jsonl file.
+    Each rank writes to results_rank_{rank}.jsonl, this function merges them.
+    """
+    import glob
+    output_file = os.path.join(save_dir, "results.jsonl")
+    rank_files = []
+
+    # Collect all rank files
+    for rank in range(num_gpus):
+        rank_file = os.path.join(save_dir, f"results_rank_{rank}.jsonl")
+        if os.path.exists(rank_file):
+            rank_files.append(rank_file)
+
+    if not rank_files:
+        raise FileNotFoundError(f"No rank result files found in {save_dir}")
+
+    print(f"Merging {len(rank_files)} rank result files into {output_file}")
+
+    # Merge all rank files into single output file
+    with open(output_file, 'w', encoding='utf-8') as outfile:
+        for rank_file in sorted(rank_files):
+            print(f"  Merging {os.path.basename(rank_file)}")
+            with open(rank_file, 'r', encoding='utf-8') as infile:
+                for line in infile:
+                    outfile.write(line)
+
+    print(f"Merged results written to {output_file}")
+
+    # Optionally remove rank files after merging
+    # for rank_file in rank_files:
+    #     os.remove(rank_file)
+
 
 def main(args):
     if(args.is_random_seed):
@@ -233,6 +268,8 @@ def main(args):
         trainer.test(model_trainer)
         if args.modality == "NLP": # can have modality specific logic here for inference
             if args.execution_mode == "inference":
+                # Merge results from all ranks into a single file
+                merge_rank_results(args.save_generation_logs_dir, num_gpus=trainer.world_size)
                 em_score, f1_score = nlp_eval_acc(os.path.join(args.save_generation_logs_dir, "results.jsonl"))
                 trainer.logger.experiment.log({"em_score": em_score, "f1_score": f1_score})
         elif args.modality == "VID":
@@ -329,7 +366,7 @@ if __name__ == '__main__':
     # NLP SPECIFIC PARAMS ############################################################################################################
 
     parser.add_argument("--tokenizer", help="tokenizer for nlp tasks", type=str, default="EleutherAI/gpt-neox-20b")
-    
+
     parser.add_argument("--pretokenize_dataset", help="whether to pretokenize the dataset and save that or just tokenize as loading the dataset. tokenizing the dataset takes a long time and may need to be done using debug dataloader. due to a bug with HF does not always work reliably, may get stuck. not currently implemented for fine-tuning datasets", action="store_true", default=False)
 
     parser.add_argument("--normalize_initial_condition", help="makes initial condition a normalized probability distribution if modality is NLP, helps a ton with stability", action="store_true", default = False)
@@ -666,7 +703,8 @@ if __name__ == '__main__':
 
     parser.add_argument("--wandb_tags", help="wandb tags to add", nargs='+', default=None)
 
-    parser.add_argument("--wandb_offline", help="set wandb to offline mode", action="store_true", default=False)
+    # parser.add_argument("--wandb_offline", help="set wandb to offline mode", action="store_true", default=False)
+    parser.add_argument("--wandb_offline", help="set wandb to offline mode", action="store_true", default=True)
 
     parser.add_argument("--wandb_watch", help="turns on watch mode for wandb - expensive so only use for debugging", action="store_true", default=False) 
 
