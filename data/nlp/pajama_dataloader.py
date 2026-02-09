@@ -15,92 +15,145 @@ import os
 import glob
 import json
 import gzip
+import hashlib
+import shutil
 from datasets import load_from_disk, load_dataset, DatasetDict, Dataset
 
-def robust_load_dataset(data_path, split="train"):
-    print(f"[Data Loader] 正在扫描路径: {data_path}")
-    
+def robust_load_dataset(data_path, split="train", force_reload=False):
+    """
+    鲁棒地加载数据集，支持智能缓存管理
+
+    修复说明:
+    - 添加文件列表指纹检测
+    - 智能缓存管理：文件列表变化时自动清除缓存
+    - 详细日志输出
+
+    Args:
+        data_path: 数据集路径
+        split: 分割名称
+        force_reload: 是否强制重新加载（忽略缓存）
+    """
+    print(f"\n{'='*80}")
+    print(f"[Data Loader] 正在加载数据集")
+    print(f"{'='*80}")
+    print(f"路径: {data_path}")
+    print(f"强制重载: {force_reload}")
+
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"数据路径不存在: {data_path}")
 
-    # --- 策略 A: 优先尝试加载 HF Arrow 格式 (速度最快) ---
-    if os.path.exists(os.path.join(data_path, "dataset_info.json")) or \
-       os.path.exists(os.path.join(data_path, "dataset_dict.json")):
-        print("[Data Loader] 检测到 HF Dataset 格式，使用 load_from_disk...")
-        try:
-            ds = load_from_disk(data_path)
-            if isinstance(ds, DatasetDict):
-                return ds[split] if split in ds else ds[list(ds.keys())[0]]
-            return ds
-        except Exception as e:
-            print(f"[Warning] load_from_disk 失败: {e}")
+    # --- 策略 A: 优先尝试加载 HF Arrow 格式 ---
+    if not force_reload:
+        if os.path.exists(os.path.join(data_path, "dataset_info.json")) or \
+           os.path.exists(os.path.join(data_path, "dataset_dict.json")):
+            print("[Data Loader] 检测到 HF Dataset 格式，使用 load_from_disk...")
+            try:
+                ds = load_from_disk(data_path)
+                print(f"✅ 成功加载，样本数: {len(ds):,}")
+                if isinstance(ds, DatasetDict):
+                    return ds[split] if split in ds else ds[list(ds.keys())[0]]
+                return ds
+            except Exception as e:
+                print(f"[Warning] load_from_disk 失败: {e}")
 
-    # --- 策略 B: 加载原始 JSON/GZ 文件 (增加智能过滤) ---
+    # --- 策略 B: 加载原始 JSON/GZ 文件 ---
     print("[Data Loader] 正在搜索原始 .json.gz / .json 文件...")
-    
+
     # 1. 获取所有文件
     all_files = glob.glob(os.path.join(data_path, "**", "*.json.gz"), recursive=True)
     if not all_files:
         all_files = glob.glob(os.path.join(data_path, "**", "*.json"), recursive=True)
-    
+
     if not all_files:
         raise FileNotFoundError(f"目录 {data_path} 下未找到任何数据文件。")
 
-    print(f"[Data Loader] 初步找到 {len(all_files)} 个文件。正在进行智能过滤...")
+    print(f"[Data Loader] 初步找到 {len(all_files):,} 个文件")
 
     # 2. 智能过滤：RedPajama V2 专用逻辑
-    # 逻辑：如果路径中包含 'documents'，通常是正文；如果包含 'quality_signals' 或 'metadata'，通常是纯元数据，需要剔除。
-    
-    # 优先寻找包含 'documents' 路径的文件
     doc_files = [f for f in all_files if "documents" in f]
-    
-    # 如果找到了 documents 文件夹下的内容，就只用这些
+
     if len(doc_files) > 0:
-        print(f"[Data Loader] 识别到 RedPajama V2 结构，仅保留 'documents' 目录下的 {len(doc_files)} 个文本文件。")
+        print(f"[Data Loader] 识别到 RedPajama V2 结构")
+        print(f"   - documents: {len(doc_files):,} 个文件")
+        print(f"   - quality_signals: {len([f for f in all_files if 'quality_signals' in f]):,} 个文件")
         target_files = doc_files
     else:
-        # 如果没找到 documents 目录，则使用所有文件，但排除明确的非文本目录
         print("[Data Loader] 未检测到标准 'documents' 目录，执行排除法...")
         target_files = [
-            f for f in all_files 
-            if "quality_signals" not in f 
-            and "metadata" not in f 
+            f for f in all_files
+            if "quality_signals" not in f
+            and "metadata" not in f
             and "stats" not in f
         ]
-        print(f"[Data Loader] 排除元数据文件后，剩余 {len(target_files)} 个文件。")
+        print(f"[Data Loader] 排除元数据文件后，剩余 {len(target_files):,} 个文件")
 
     if not target_files:
-        raise ValueError("过滤后没有剩余文件！请检查你的数据目录是否只包含 quality_signals 而没有 documents？")
+        raise ValueError("过滤后没有剩余文件！")
 
-    # 3. 使用 load_dataset 加载清洗后的文件列表
-    print("[Data Loader] 开始加载数据...")
+    # 3. 【关键修复】缓存管理：基于文件列表哈希
+    sorted_files = sorted(target_files)
+    files_signature = hashlib.md5(
+        str(sorted_files).encode()
+    ).hexdigest()[:12]
+
+    cache_dir = os.path.join(data_path, ".cache")
+    signature_file = os.path.join(cache_dir, "files_signature.txt")
+
+    # 检查缓存是否过期
+    cache_valid = False
+    if os.path.exists(signature_file) and not force_reload:
+        try:
+            with open(signature_file, 'r') as f:
+                cached_sig = f.read().strip()
+            cache_valid = (cached_sig == files_signature)
+            print(f"\n[Cache] 签名对比: {'匹配' if cache_valid else '不匹配'}")
+            print(f"   缓存: {cached_sig}")
+            print(f"   当前: {files_signature}")
+        except:
+            pass
+
+    # 【关键修复】如果缓存过期，清除旧缓存
+    if (not cache_valid or force_reload) and os.path.exists(cache_dir):
+        print(f"[Cache] 清除旧缓存...")
+        try:
+            shutil.rmtree(cache_dir)
+            print(f"[Cache] ✅ 缓存已清除")
+        except Exception as e:
+            print(f"[Cache] ⚠️  清除失败: {e}")
+
+    # 4. 使用 load_dataset 加载数据
+    print(f"\n[Data Loader] 开始加载 {len(target_files):,} 个文件...")
+    print(f"[Data Loader] 估计样本数: ~{len(target_files) * 27000:,}")
+
     try:
+        os.makedirs(cache_dir, exist_ok=True)
+
         ds = load_dataset(
-            "json", 
-            data_files=target_files, 
+            "json",
+            data_files=sorted_files,  # 使用排序后的列表
             split="train",
-            cache_dir=os.path.join(data_path, ".cache"),
-            # num_proc=1 # 如果遇到死锁，取消注释此行
+            cache_dir=cache_dir,
+            download_mode='force_redownload' if (not cache_valid or force_reload) else None,
+            # num_proc=1  # 如果遇到死锁，取消注释此行
         )
+
+        # 保存文件签名
+        with open(signature_file, 'w') as f:
+            f.write(files_signature)
+
     except Exception as e:
         print(f"[Error] 标准 JSON 加载失败: {e}")
-        print("[Data Loader] 尝试使用【生成器模式】作为最后手段（速度较慢但最鲁棒）...")
-        return load_dataset_via_generator(target_files)
+        print("[Data Loader] 尝试使用【生成器模式】...")
+        return load_dataset_via_generator(sorted_files)
 
-    # 4. 统一列名 (RedPajama V2 raw_content -> text)
+    # 5. 统一列名
+    print(f"\n[Data Loader] 加载成功！样本数: {len(ds):,}")
+
     if "raw_content" in ds.column_names and "text" not in ds.column_names:
         print("[Data Loader] 重命名列: raw_content -> text")
         ds = ds.rename_column("raw_content", "text")
-        
-    # 5. 移除不必要的列以节省内存 (可选，防止后续处理报错)
-    # 保留核心列，防止 metadata 里的奇怪结构导致后面报错
-    keep_cols = {"text", "id", "meta", "source"}
-    cols_to_remove = [c for c in ds.column_names if c not in keep_cols]
-    if cols_to_remove:
-        # 这里不真正删除，只是打印日志，防止误删有用信息。
-        # 如果后续训练代码报错有多余列，可以在这里 ds.remove_columns(cols_to_remove)
-        pass
 
+    print(f"{'='*80}\n")
     return ds
 
 def load_dataset_via_generator(file_list):
