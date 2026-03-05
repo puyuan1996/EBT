@@ -21,11 +21,31 @@ class EBT_NLP(L.LightningModule):
             self.hparams.update(hparams)
         else:
             self.hparams.update(vars(hparams))
-        
-        tokenizer = AutoTokenizer.from_pretrained(self.hparams.tokenizer, clean_up_tokenization_spaces = False)
+
+        # Helper function to safely get hparams value (works for both dict and AttributeDict)
+        def get_hparam(key, default=None):
+            if hasattr(self.hparams, key):
+                return getattr(self.hparams, key, default)
+            elif isinstance(self.hparams, dict) and key in self.hparams:
+                return self.hparams[key]
+            return default
+
+        # Check if using nanochat tokenizer
+        use_nanochat = get_hparam('use_nanochat_tokenizer', False)
+        if use_nanochat:
+            from utils.nanochat_tokenizer_adapter import get_nanochat_tokenizer
+            tokenizer = get_nanochat_tokenizer()
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(self.hparams.tokenizer, clean_up_tokenization_spaces = False)
         self.tokenizer_pad_token_id = tokenizer.eos_token_id # is token 0, was right padding things
-        
-        self.vocab_size = len(tokenizer) # self.vocab_size = self.tokenizer.vocab_size caused errors since is smaller than len(self.tokenizer), is 50254 for neox-20b, len tokenizer is 50277 so decided to use that
+
+        # Allow explicit vocab_size override from hparams (useful for loading checkpoints with different vocab sizes)
+        explicit_vocab_size = get_hparam('vocab_size', None)
+        if explicit_vocab_size is not None and explicit_vocab_size > 0:
+            self.vocab_size = explicit_vocab_size
+            print(f"[EBT_NLP] Using explicit vocab_size from hparams: {self.vocab_size}")
+        else:
+            self.vocab_size = len(tokenizer) # self.vocab_size = self.tokenizer.vocab_size caused errors since is smaller than len(self.tokenizer), is 50254 for neox-20b, len tokenizer is 50277 so decided to use that
         
         self.alpha = nn.Parameter(torch.tensor(float(self.hparams.mcmc_step_size)), requires_grad=self.hparams.mcmc_step_size_learnable)
         self.langevin_dynamics_noise_std = nn.Parameter(torch.tensor(float(self.hparams.langevin_dynamics_noise)), requires_grad=False) # if using self.hparams.langevin_dynamics_noise_learnable this will be turned on in warm_up_finished func

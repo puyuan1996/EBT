@@ -66,7 +66,12 @@ def call_model_forward_ppl(hparams, model, input_tokens, start_pos, bsz):
     return logits, energies
 
 def generate_text(model, batch, hparams):
-    tokenizer = AutoTokenizer.from_pretrained(hparams.tokenizer, clean_up_tokenization_spaces = False)
+    # Check if using nanochat tokenizer
+    if hasattr(hparams, 'use_nanochat_tokenizer') and hparams.use_nanochat_tokenizer:
+        from utils.nanochat_tokenizer_adapter import get_nanochat_tokenizer
+        tokenizer = get_nanochat_tokenizer()
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(hparams.tokenizer, clean_up_tokenization_spaces = False)
     tokenizer_pad_token_id = tokenizer.eos_token_id # is token 0, was right padding things
         
     questions, answers = batch
