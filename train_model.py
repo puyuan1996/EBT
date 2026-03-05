@@ -27,6 +27,239 @@ from utils import text_logger
 from base_model_trainer import *
 from inference.nlp.eval import nlp_eval_acc
 
+# ============================================================================
+# Cross-repository checkpoint compatibility fix
+# Handles checkpoints from Nova that reference nanochat modules
+# ============================================================================
+import pickle
+import types
+
+def load_checkpoint_safely(checkpoint_path: str, verbose: bool = True):
+    """
+    Safely load a checkpoint that may contain references to unavailable modules.
+
+    This function handles checkpoints from different repositories (e.g., Nova)
+    that reference modules not available in the current environment (e.g., nanochat).
+
+    Args:
+        checkpoint_path: Path to the checkpoint file
+        verbose: Whether to print detailed loading information
+
+    Returns:
+        Dictionary containing checkpoint data (state_dict, hyper_parameters, etc.)
+    """
+    if verbose:
+        print(f"[SafeCheckpointLoader] Loading checkpoint: {checkpoint_path}")
+
+    # Strategy 1: Try direct loading first
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        if verbose:
+            print("[SafeCheckpointLoader] ✓ Loaded successfully (direct)")
+        return checkpoint
+    except ModuleNotFoundError as e:
+        missing_module = str(e).split("'")[-2] if "'" in str(e) else "unknown"
+        if verbose:
+            print(f"[SafeCheckpointLoader] Direct load failed: {e}")
+            print(f"[SafeCheckpointLoader] Missing module: {missing_module}")
+            print(f"[SafeCheckpointLoader] Attempting fallback strategies...")
+    except Exception as e:
+        if verbose:
+            print(f"[SafeCheckpointLoader] Direct load failed: {e}")
+            print(f"[SafeCheckpointLoader] Attempting fallback strategies...")
+
+    # Strategy 2: Create comprehensive module shims
+    def create_module_shim(module_name: str):
+        """Create a dummy module that can be imported during unpickling."""
+        if verbose:
+            print(f"[SafeCheckpointLoader] Creating shim for module: {module_name}")
+
+        # Base module
+        module = types.ModuleType(module_name)
+        sys.modules[module_name] = module
+
+        # Submodules to create
+        submodules = ['tokenizer', 'dataset', 'dataloader', 'common',
+                      'engine', 'optim', 'checkpoint_manager', 'gpt', 'core_eval']
+
+        # Base dummy class
+        class DummyBase:
+            """Base dummy class for all nanochat objects."""
+            def __init__(self, *args, **kwargs):
+                # Store all arguments for inspection
+                self._args = args
+                self._kwargs = kwargs
+                if kwargs:
+                    self.__dict__.update(kwargs)
+
+            def __repr__(self):
+                return f"<DummyObject({self.__class__.__name__})>"
+
+            def __reduce__(self):
+                # Make object picklable
+                return (self.__class__, self._args if hasattr(self, '_args') else (),
+                        self.__dict__ if self.__dict__ else {})
+
+            def __getattr__(self, name):
+                # Return a dummy for any attribute access
+                return lambda *args, **kwargs: None
+
+        # Classes to create in each submodule
+        common_classes = [
+            'Tokenizer', 'Dataset', 'DataLoader', 'Collator',
+            'Config', 'Model', 'Optimizer', 'Manager', 'Scheduler',
+            # Specific nanochat classes we know about
+            'RustBPETokenizer', 'GPTTokenizer', 'NanoChatTokenizer',
+            'LlamaTokenizer', 'BPETokenizer'
+        ]
+
+        for submodule_name in submodules:
+            full_name = f"{module_name}.{submodule_name}"
+            submodule = types.ModuleType(full_name)
+
+            # Create classes in submodule
+            for class_name in common_classes:
+                # Create a unique class for each
+                cls = type(
+                    class_name,
+                    (DummyBase,),
+                    {
+                        '__module__': full_name,
+                        '__name__': class_name,
+                    }
+                )
+                setattr(submodule, class_name, cls)
+
+            # Register submodule
+            sys.modules[full_name] = submodule
+            setattr(module, submodule_name, submodule)
+
+        return module
+
+    # Create shims
+    create_module_shim('nanochat')
+
+    # Strategy 3: Use torch.load with custom remapping
+    # Monkey-patch the import system temporarily
+    import builtins
+    original_import = builtins.__import__
+
+    def custom_import(name, *args, **kwargs):
+        """Custom import that returns shimmed modules for nanochat."""
+        if name.startswith('nanochat'):
+            # Return the shimmed module if it exists
+            if name in sys.modules:
+                return sys.modules[name]
+            # Otherwise create it on the fly
+            create_module_shim('nanochat')
+            return sys.modules.get(name, types.ModuleType(name))
+        return original_import(name, *args, **kwargs)
+
+    try:
+        # Temporarily replace import
+        builtins.__import__ = custom_import
+
+        # Try torch.load again with shims in place
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+
+        if verbose:
+            print("[SafeCheckpointLoader] ✓ Loaded successfully (with shimming)")
+
+        return checkpoint
+
+    except Exception as e:
+        if verbose:
+            print(f"[SafeCheckpointLoader] Load with shimming failed: {e}")
+            print(f"[SafeCheckpointLoader] Error type: {type(e).__name__}")
+
+    finally:
+        # Restore original import
+        builtins.__import__ = original_import
+
+    # Strategy 4: Last resort - extract only essential data with custom unpickler
+    if verbose:
+        print("[SafeCheckpointLoader] Attempting custom unpickler (last resort)...")
+
+    import io
+    import zipfile
+
+    # Check if it's a ZIP-based checkpoint (PyTorch 1.6+)
+    try:
+        with zipfile.ZipFile(checkpoint_path, 'r') as z:
+            # It's a zip file, use torch.load with map_location
+            if verbose:
+                print("[SafeCheckpointLoader] Detected zip-based checkpoint format")
+
+            # For zip-based checkpoints, we need a different approach
+            # Try loading with a more permissive unpickler
+            class PermissiveUnpickler(pickle.Unpickler):
+                def find_class(self, module, name):
+                    if module.startswith('nanochat'):
+                        # Return from shim
+                        if module in sys.modules:
+                            mod = sys.modules[module]
+                            if hasattr(mod, name):
+                                return getattr(mod, name)
+                        # Create dummy
+                        return type(name, (), {'__module__': module})
+                    try:
+                        return super().find_class(module, name)
+                    except:
+                        return type(name, (), {'__module__': module})
+
+            # This won't work directly with zipfile, so we use torch's internal loader
+            # But override the Unpickler
+            original_unpickler = pickle.Unpickler
+            pickle.Unpickler = PermissiveUnpickler
+
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+                if verbose:
+                    print("[SafeCheckpointLoader] ✓ Loaded successfully (permissive unpickler)")
+                return checkpoint
+            finally:
+                pickle.Unpickler = original_unpickler
+
+    except zipfile.BadZipFile:
+        # Not a zip file, it's a regular pickle
+        if verbose:
+            print("[SafeCheckpointLoader] Not a zip checkpoint, trying pickle directly")
+
+    # Regular pickle file - use custom unpickler
+    class FinalUnpickler(pickle.Unpickler):
+        def find_class(self, module, name):
+            if 'nanochat' in module:
+                if module in sys.modules:
+                    mod = sys.modules[module]
+                    if hasattr(mod, name):
+                        return getattr(mod, name)
+                return type(name, (), {'__module__': module})
+            try:
+                return super().find_class(module, name)
+            except:
+                return type(name, (), {'__module__': module})
+
+        def persistent_load(self, pid):
+            # Simple pass-through for persistent storage references
+            return pid
+
+    try:
+        with open(checkpoint_path, 'rb') as f:
+            unpickler = FinalUnpickler(f)
+            checkpoint = unpickler.load()
+
+        if verbose:
+            print("[SafeCheckpointLoader] ✓ Loaded successfully (final unpickler)")
+
+        return checkpoint
+
+    except Exception as e:
+        print(f"[SafeCheckpointLoader] ✗ All loading strategies failed!")
+        print(f"[SafeCheckpointLoader] Final error: {e}")
+        print(f"\nTo debug this issue, try:")
+        print(f"  python /mnt/shared-storage-user/puyuan/code/EBT/debug_checkpoint.py")
+        raise
+
 @rank_zero_only # to ensure only one wandb run is created, if didnt do that then each GPU would create its own wandb run
 def setup_wandb(args):
     import wandb
@@ -172,46 +405,49 @@ def main(args):
     effective_batch_size = args.num_gpus * args.batch_size_per_device * args.accumulate_grad_batches
     print(f"effective_batch_size: {effective_batch_size}", "batch_size_per_device", args.batch_size_per_device)
     if args.lr_scaling_rule:
-        scaled_lr = args.peak_learning_rate * effective_batch_size / 256 
+        scaled_lr = args.peak_learning_rate * effective_batch_size / 256
         args.peak_learning_rate = scaled_lr
         print(f"Learning Rate rescaled to: {scaled_lr} based off lr_scaling_rule")
     if args.max_scheduling_steps == -1:
         args.max_scheduling_steps = args.max_steps
 
-    model_trainer = ModelTrainer(args)
+    # Only create model_trainer if not in only_test mode
+    # In only_test mode, we'll create it later with the correct pretrained_hparams
+    if not args.only_test:
+        model_trainer = ModelTrainer(args)
 
-    if args.execution_mode == "finetune":
-        assert args.finetuning_model_ckpt != None and args.resume_training_ckpt == "", "Must provide a checkpoint when finetuning and cannot provide a resume_training_ckpt."
-        model_trainer.model = load_trained_pl_model(args.finetuning_model_ckpt, args)
+        if args.execution_mode == "finetune":
+            assert args.finetuning_model_ckpt != None and args.resume_training_ckpt == "", "Must provide a checkpoint when finetuning and cannot provide a resume_training_ckpt."
+            model_trainer.model = load_trained_pl_model(args.finetuning_model_ckpt, args)
 
-    timestamp = int(time.time())
-    dt_object = datetime.fromtimestamp(timestamp)
-    dt_string = dt_object.strftime("%Y-%m-%d_%H-%M-%S")
+        timestamp = int(time.time())
+        dt_object = datetime.fromtimestamp(timestamp)
+        dt_string = dt_object.strftime("%Y-%m-%d_%H-%M-%S")
 
-    if args.debug_dataloader:
-        debug_dataloader(args, model_trainer)
-        return
-    if args.log_model_archi:
-        print(str(model_trainer.model))
-        print(str(args))
+        if args.debug_dataloader:
+            debug_dataloader(args, model_trainer)
+            return
+        if args.log_model_archi:
+            print(str(model_trainer.model))
+            print(str(args))
 
-    if not args.no_wandb and args.wandb_watch:
-        init_wandb_watch(wandb_logger, model_trainer, args.wandb_watch_log_freq)
+        if not args.no_wandb and args.wandb_watch:
+            init_wandb_watch(wandb_logger, model_trainer, args.wandb_watch_log_freq)
 
-    if args.create_model_viz:
-        # BACKLOG use tensorboard for this if active eventually. disabled for now since makes some things challenging
-        return
-    print(f'pytorch version: {torch.__version__}\n')
+        if args.create_model_viz:
+            # BACKLOG use tensorboard for this if active eventually. disabled for now since makes some things challenging
+            return
+        print(f'pytorch version: {torch.__version__}\n')
 
-    if args.set_matmul_precision is not None: #default is highest
-        torch.set_float32_matmul_precision(args.set_matmul_precision)
-    
-    checkpoint_filename = "epoch={epoch}-step={step}-" + args.checkpoint_monitor_string + "={"+args.checkpoint_monitor_string+":.4f}"
-    checkpoint_callback = ModelCheckpoint(monitor=args.checkpoint_monitor_string, mode = args.checkpoint_monitor_mode, save_top_k=args.save_top_k_ckpts, save_last = True, dirpath=f"./logs/checkpoints/{args.run_name}_{dt_string}_", filename=checkpoint_filename, verbose=True)
-    
-    for name, param in model_trainer.model.named_parameters():
-        if not param.requires_grad:
-            print(f"Non-trainable parameters: {name} with shape {param.shape}")
+        if args.set_matmul_precision is not None: #default is highest
+            torch.set_float32_matmul_precision(args.set_matmul_precision)
+
+        checkpoint_filename = "epoch={epoch}-step={step}-" + args.checkpoint_monitor_string + "={"+args.checkpoint_monitor_string+":.4f}"
+        checkpoint_callback = ModelCheckpoint(monitor=args.checkpoint_monitor_string, mode = args.checkpoint_monitor_mode, save_top_k=args.save_top_k_ckpts, save_last = True, dirpath=f"./logs/checkpoints/{args.run_name}_{dt_string}_", filename=checkpoint_filename, verbose=True)
+
+        for name, param in model_trainer.model.named_parameters():
+            if not param.requires_grad:
+                print(f"Non-trainable parameters: {name} with shape {param.shape}")
     
     if not args.only_test: #training and testing (if testing selected) as per usual
         print("$$$$$$$$$$  STARTED TRAINING  $$$$$$$$$$")
@@ -242,9 +478,189 @@ def main(args):
         if os.path.exists(args.save_generation_logs_dir): # remove any existing logs
             shutil.rmtree(args.save_generation_logs_dir)
 
-        
-        checkpoint = torch.load(args.only_test_model_ckpt, weights_only=False)
+        # Create a dummy checkpoint_callback for test mode (not used but required by set_trainer)
+        checkpoint_callback = None
+
+
+        checkpoint = load_checkpoint_safely(args.only_test_model_ckpt, verbose=True)
         pretrained_hparams = checkpoint['hyper_parameters']
+
+        # Clean up any dummy objects in hyper_parameters that might have been created during unpickling
+        def clean_dummy_objects(hparams_dict, args_dict):
+            """Replace dummy objects with actual values from args."""
+            cleaned_keys = []
+            for key, value in list(hparams_dict.items()):
+                should_clean = False
+
+                # Check if value is a dummy object (has our marker in repr)
+                if hasattr(value, '__repr__'):
+                    repr_str = repr(value)
+                    if 'DummyObject' in repr_str or 'DummyBase' in repr_str or '<Dummy' in repr_str:
+                        should_clean = True
+
+                # Check if it's an object type that shouldn't be in hparams
+                # (hparams should only contain primitives, strings, numbers, lists, dicts)
+                if not should_clean and value is not None:
+                    value_type = type(value).__name__
+                    # If it's not a basic type and has a custom module, it's likely a dummy/unwanted object
+                    if value_type not in ['str', 'int', 'float', 'bool', 'list', 'dict', 'tuple', 'NoneType']:
+                        # Check if it's from nanochat or a custom module
+                        if hasattr(type(value), '__module__'):
+                            module = type(value).__module__
+                            if 'nanochat' in module or module == '__main__':
+                                should_clean = True
+                                print(f"[CleanUp] Detected non-primitive type '{value_type}' from module '{module}' for key '{key}'")
+
+                if should_clean:
+                    # This is a dummy or unwanted object, replace with value from args if available
+                    if key in args_dict:
+                        print(f"[CleanUp] Replacing dummy/object for '{key}' with value from args: {args_dict[key]}")
+                        hparams_dict[key] = args_dict[key]
+                        cleaned_keys.append(key)
+                    else:
+                        print(f"[CleanUp] WARNING: Found dummy/object for '{key}' but no replacement in args")
+                        # For critical fields like tokenizer, we need to infer the correct value
+                        if key == 'tokenizer':
+                            # Check the vocab size in the checkpoint to infer the correct tokenizer
+                            # GPT-NeoX-20B tokenizer has vocab_size = 50432 (but often padded to 50277 or 32768)
+                            # GPT2 tokenizer has vocab_size = 50257
+                            default_tokenizer = "/mnt/shared-storage-user/puyuan/code/EBT/gpt-neox-20b-tokenizer"
+                            print(f"[CleanUp] Using default tokenizer (gpt-neox-20b): {default_tokenizer}")
+                            hparams_dict[key] = default_tokenizer
+                        else:
+                            # Set to None as fallback
+                            hparams_dict[key] = None
+
+            if cleaned_keys:
+                print(f"[CleanUp] Cleaned {len(cleaned_keys)} keys: {', '.join(cleaned_keys)}")
+            return hparams_dict
+
+        pretrained_hparams = clean_dummy_objects(pretrained_hparams, vars(args))
+
+        # ============================================================================
+        # CRITICAL: Automatic vocab size detection and handling
+        # This ensures the model architecture matches the checkpoint regardless of tokenizer
+        # ============================================================================
+        if 'state_dict' in checkpoint:
+            state_dict = checkpoint['state_dict']
+            # Get vocab size from checkpoint
+            if 'model.embeddings.weight' in state_dict:
+                ckpt_vocab_size = state_dict['model.embeddings.weight'].shape[0]
+                ckpt_embed_dim = state_dict['model.embeddings.weight'].shape[1]
+                print(f"\n[VocabCheck] Checkpoint vocab_size: {ckpt_vocab_size}")
+                print(f"[VocabCheck] Checkpoint embed_dim: {ckpt_embed_dim}")
+
+                # Check what tokenizer path is currently set
+                tokenizer_path = pretrained_hparams.get('tokenizer', 'NOT_SET')
+                print(f"[VocabCheck] Current tokenizer path: {tokenizer_path}")
+
+                # Define known tokenizers and their vocab sizes
+                KNOWN_TOKENIZERS = {
+                    32768: {
+                        'name': 'RustBPETokenizer (nanochat custom)',
+                        'description': 'Custom BPE tokenizer trained in nanochat repo (2^15 = 32768)',
+                        'note': 'Used in Nova checkpoints'
+                    },
+                    50277: {
+                        'name': 'gpt-neox-20b',
+                        'description': 'GPT-NeoX-20B tokenizer',
+                        'path': '/mnt/shared-storage-user/puyuan/code/EBT/gpt-neox-20b-tokenizer'
+                    },
+                    50257: {
+                        'name': 'gpt2',
+                        'description': 'GPT-2 tokenizer',
+                        'path': 'gpt2'
+                    },
+                    32000: {
+                        'name': 'llama',
+                        'description': 'LLaMA tokenizer'
+                    }
+                }
+
+                # Identify the tokenizer used in checkpoint
+                if ckpt_vocab_size in KNOWN_TOKENIZERS:
+                    tokenizer_info = KNOWN_TOKENIZERS[ckpt_vocab_size]
+                    print(f"[VocabCheck] Detected tokenizer: {tokenizer_info['name']}")
+                    print(f"[VocabCheck] Description: {tokenizer_info['description']}")
+                    if 'note' in tokenizer_info:
+                        print(f"[VocabCheck] Note: {tokenizer_info['note']}")
+                else:
+                    print(f"[VocabCheck] WARNING: Unknown tokenizer with vocab_size={ckpt_vocab_size}")
+                    print(f"[VocabCheck] This might be a custom or modified tokenizer")
+
+                # CRITICAL FIX: Always explicitly set vocab_size in hparams
+                # This overrides the automatic vocab_size detection from tokenizer
+                print(f"\n[VocabCheck] APPLYING FIX: Explicitly setting vocab_size={ckpt_vocab_size}")
+                pretrained_hparams['vocab_size'] = ckpt_vocab_size
+
+                # IMPORTANT: Auto-select the correct tokenizer based on checkpoint vocab_size
+                if ckpt_vocab_size == 32768:
+                    # This is nanochat's RustBPETokenizer
+                    print(f"[VocabCheck] Detected nanochat RustBPETokenizer (vocab_size=32768)")
+                    print(f"[VocabCheck] Enabling use_nanochat_tokenizer flag")
+                    pretrained_hparams['use_nanochat_tokenizer'] = True
+                    pretrained_hparams['tokenizer'] = '/mnt/shared-storage-user/puyuan/code/nanochat/.cache/nanochat/tokenizer'
+                    print(f"[VocabCheck] ✓ Will use nanochat tokenizer from: {pretrained_hparams['tokenizer']}")
+
+                elif ckpt_vocab_size in KNOWN_TOKENIZERS and 'path' in KNOWN_TOKENIZERS[ckpt_vocab_size]:
+                    correct_tokenizer_path = KNOWN_TOKENIZERS[ckpt_vocab_size]['path']
+                    pretrained_hparams['use_nanochat_tokenizer'] = False
+
+                    # Always use the checkpoint's tokenizer for evaluation/inference
+                    if tokenizer_path != correct_tokenizer_path:
+                        print(f"[VocabCheck] Switching tokenizer to match checkpoint:")
+                        print(f"[VocabCheck]   From: {tokenizer_path}")
+                        print(f"[VocabCheck]   To:   {correct_tokenizer_path}")
+                        pretrained_hparams['tokenizer'] = correct_tokenizer_path
+                    else:
+                        print(f"[VocabCheck] ✓ Tokenizer already matches checkpoint: {tokenizer_path}")
+
+                else:
+                    # Unknown vocab size - keep user setting and warn
+                    print(f"[VocabCheck] WARNING: Unknown vocab_size={ckpt_vocab_size}")
+                    print(f"[VocabCheck] Cannot auto-select tokenizer")
+                    print(f"[VocabCheck] Using specified tokenizer: {tokenizer_path}")
+                    print(f"[VocabCheck] Please verify this is correct!")
+                    pretrained_hparams['use_nanochat_tokenizer'] = False
+
+                # Verify vocab_to_embed layer if it exists
+                if 'model.vocab_to_embed.weight' in state_dict:
+                    vocab_to_embed_shape = state_dict['model.vocab_to_embed.weight'].shape
+                    expected_shape = (ckpt_embed_dim, ckpt_vocab_size)
+                    if vocab_to_embed_shape == expected_shape:
+                        print(f"[VocabCheck] ✓ vocab_to_embed shape verified: {vocab_to_embed_shape}")
+                    else:
+                        print(f"[VocabCheck] WARNING: vocab_to_embed shape mismatch")
+                        print(f"[VocabCheck]   Found: {vocab_to_embed_shape}")
+                        print(f"[VocabCheck]   Expected: {expected_shape}")
+
+                print(f"\n[VocabCheck] ✓ Vocab size configuration complete")
+                print(f"[VocabCheck] ✓ Model will be initialized with vocab_size={ckpt_vocab_size}")
+                print(f"[VocabCheck] ✓ This matches the checkpoint exactly\n")
+
+            else:
+                print("[VocabCheck] WARNING: Could not find embeddings in state_dict")
+                print("[VocabCheck] Skipping vocab size verification")
+
+        # ============================================================================
+        # CRITICAL FIX: Sync corrected hparams back to args
+        # 必须将从 checkpoint 自动检测并修正的 tokenizer 设置同步回 args
+        # 否则 DataLoader 会使用 args 中的默认 tokenizer，导致 token ID 越界
+        # ============================================================================
+        if 'tokenizer' in pretrained_hparams:
+            print(f"[SyncArgs] Overwriting args.tokenizer with: {pretrained_hparams['tokenizer']}")
+            args.tokenizer = pretrained_hparams['tokenizer']
+        
+        if 'vocab_size' in pretrained_hparams:
+            # 如果 args 中没有 vocab_size 属性，可以动态添加，或者 ModelTrainer 可能依赖 hparams
+            args.vocab_size = pretrained_hparams['vocab_size']
+            print(f"[SyncArgs] Overwriting args.vocab_size with: {pretrained_hparams['vocab_size']}")
+
+        if 'use_nanochat_tokenizer' in pretrained_hparams:
+            args.use_nanochat_tokenizer = pretrained_hparams['use_nanochat_tokenizer']
+            print(f"[SyncArgs] Overwriting args.use_nanochat_tokenizer with: {pretrained_hparams['use_nanochat_tokenizer']}")
+        # ============================================================================
+
 
         default_args = vars(args).copy() # NOTE this is so can test older models trained with older code as well as use newer hparams (for inference) on pretrained models, may be finicky feel free to tweak
         for key, value in default_args.items():
@@ -296,6 +712,12 @@ def set_trainer(args, wandb_logger, checkpoint_callback, stage = "train"):
     limit_val_batches = 0 if args.overfit_batches > 0 else args.limit_val_batches
     val_check_interval = args.val_check_interval if args.val_check_interval == 1.0 else args.val_check_interval * args.accumulate_grad_batches  #NOTE the reason we mult by args.accumulate_grad_batches is because of this bug https://github.com/Lightning-AI/pytorch-lightning/issues/12205
     limit_test_batches = args.limit_test_batches if args.limit_test_batches == 1 else args.limit_test_batches * args.accumulate_grad_batches
+
+    # Build callbacks list - only include checkpoint_callback if it's not None
+    callbacks = [ModelSummary(max_depth=-1)]
+    if checkpoint_callback is not None:
+        callbacks.insert(0, checkpoint_callback)
+
     trainer = L.Trainer(
         accelerator="auto",
         devices = args.gpus,
@@ -304,7 +726,7 @@ def set_trainer(args, wandb_logger, checkpoint_callback, stage = "train"):
         max_steps=args.max_steps,
         logger=wandb_logger,
         enable_model_summary=args.log_model_archi,
-        callbacks = [checkpoint_callback, ModelSummary(max_depth=-1)],
+        callbacks = callbacks,
         strategy = args.distributed_strategy, 
         enable_checkpointing=True,
         fast_dev_run = args.fast_dev_run,

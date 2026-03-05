@@ -22,7 +22,10 @@ BENCHMARKS=("gsm8k") # "gsm8k" "ai2arc" "bigbench_matrixshapes" "squad" "bigbenc
 DATASET=${BENCHMARKS[$SLURM_ARRAY_TASK_ID]}
 export RUN_NAME="${RUN_NAME}_${DATASET}"
 
-python train_model.py \
+# --tokenizer "/mnt/shared-storage-user/puyuan/code/EBT/gpt-neox-20b-tokenizer" \
+# --tokenizer "/mnt/shared-storage-user/puyuan/code/nanochat/.cache/nanochat/tokenizer" \
+
+python3 train_model.py \
 --run_name ${RUN_NAME} \
 --modality "NLP" \
 --model_name ${MODEL_NAME} \
@@ -64,7 +67,7 @@ python train_model.py \
 --infer_langevin_dynamics_noise 1 \
 --infer_ebt_num_steps 10 \
 --only_test \
---only_test_model_ckpt "/mnt/shared-storage-user/puyuan/code/EBT/logs/checkpoints/ebt-xxs-bs_256_s1_lr_0.0012_2026-02-05_02-06-28_/epoch=epoch=34-step=step=18760-valid_loss=valid_loss=4.2817.ckpt" \
+--only_test_model_ckpt "/mnt/shared-storage-user/puyuan/code/nova/nova/ebt/logs/checkpoints/ebt-small-bs_256_s1_lr_0.0012_2026-03-05_01-01-55_/last.ckpt" \
 --infer_max_gen_len 520 \
 --infer_topp 0.1 \
 --infer_temp 0.0 \
@@ -74,6 +77,12 @@ python train_model.py \
 --wandb_watch \
 ${SLURM_ARRAY_TASK_ID:+--is_slurm_run}
 
+
+
+# --only_test_model_ckpt "/mnt/shared-storage-user/puyuan/code/EBT/logs/checkpoints/ebt-xxs-bs_256_s1_lr_0.0012_2026-02-05_02-06-28_/epoch=epoch=34-step=step=18760-valid_loss=valid_loss=4.2817.ckpt" \
+# --only_test_model_ckpt "/mnt/shared-storage-user/puyuan/code/nova/nova/ebt/logs/checkpoints/ebt-small-bs_256_s1_lr_0.0012_2026-03-05_01-01-55_/epoch=0-step=45000-valid_loss=3.6574.ckpt" \
+
 # --tokenizer "EleutherAI/gpt-neox-20b" \
 # --infer_ebt_num_steps 2 \
 # --infer_max_gen_len 2 \
+# --only_test_model_ckpt "/mnt/shared-storage-user/puyuan/code/EBT/logs/checkpoints/ebt-xxs-bs_256_s1_lr_0.0012+pajama2000_2026-02-10_22-48-45_/epoch=epoch=3-step=step=325685-valid_loss=valid_loss=3.3130.ckpt" \
